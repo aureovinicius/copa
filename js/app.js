@@ -322,13 +322,78 @@ function bracketMatch(m) {
   </div>`;
 }
 
+// ---------- Projeção do chaveamento pela classificação parcial ----------
+// Tabela OFICIAL da Copa 2026 (FIFA): 16-avos = jogos 73–88.
+// ['W',g]=1º do grupo g; ['R',g]=2º do grupo g; ['T',jogo]=3º alocado àquele jogo.
+const BR_THIRD_SLOTS = [
+  { m: 74, allow: 'ABCDF' }, { m: 77, allow: 'CDFGH' }, { m: 79, allow: 'CEFHI' },
+  { m: 80, allow: 'EHIJK' }, { m: 81, allow: 'BEFIJ' }, { m: 82, allow: 'AEHIJ' },
+  { m: 85, allow: 'EFGIJ' }, { m: 87, allow: 'DEIJL' },
+];
+const BR_R32 = [
+  [73, ['R', 'A'], ['R', 'B']], [74, ['W', 'E'], ['T', 74]], [75, ['W', 'F'], ['R', 'C']],
+  [76, ['W', 'C'], ['R', 'F']], [77, ['W', 'I'], ['T', 77]], [78, ['R', 'E'], ['R', 'I']],
+  [79, ['W', 'A'], ['T', 79]], [80, ['W', 'L'], ['T', 80]], [81, ['W', 'D'], ['T', 81]],
+  [82, ['W', 'G'], ['T', 82]], [83, ['R', 'K'], ['R', 'L']], [84, ['W', 'H'], ['R', 'J']],
+  [85, ['W', 'B'], ['T', 85]], [86, ['W', 'J'], ['R', 'H']], [87, ['W', 'K'], ['T', 87]],
+  [88, ['R', 'D'], ['R', 'G']],
+];
+// Aloca os 8 melhores 3ºs aos slots respeitando os grupos permitidos (matching bipartido).
+function brAssignThirds(bestThirds) {
+  const n = BR_THIRD_SLOTS.length;
+  const forSlot = new Array(n).fill(-1);
+  const tryK = (i, seen) => {
+    for (let s = 0; s < n; s++) {
+      if (BR_THIRD_SLOTS[s].allow.includes(bestThirds[i].group) && !seen[s]) {
+        seen[s] = true;
+        if (forSlot[s] < 0 || tryK(forSlot[s], seen)) { forSlot[s] = i; return true; }
+      }
+    }
+    return false;
+  };
+  for (let i = 0; i < bestThirds.length; i++) tryK(i, new Array(n).fill(false));
+  const byMatch = {};
+  for (let s = 0; s < n; s++) if (forSlot[s] >= 0) byMatch[BR_THIRD_SLOTS[s].m] = bestThirds[forSlot[s]].team;
+  return byMatch;
+}
+const teamKnown = (tm) => !!(tm && (tm.tla || tm.name));
+
+// Monta os 16 confrontos dos 16-avos a partir da classificação ATUAL dos grupos.
+function projectedR32() {
+  const groups = {};
+  (DATA.standings?.standings || []).filter(s => s.type === 'TOTAL' && s.group).forEach(s => {
+    const letter = (s.group || '').replace(/^group/i, '').replace(/[_\s]/g, '').toUpperCase();
+    groups[letter] = [...s.table].sort((a, b) => a.position - b.position);
+  });
+  if (Object.keys(groups).length < 12) return null; // precisa dos 12 grupos
+  const winners = {}, runners = {}, thirds = [];
+  for (const [g, rows] of Object.entries(groups)) {
+    if (rows[0]) winners[g] = rows[0].team;
+    if (rows[1]) runners[g] = rows[1].team;
+    if (rows[2]) thirds.push({ group: g, team: rows[2].team, row: rows[2] });
+  }
+  thirds.sort((a, b) => b.row.points - a.row.points
+    || b.row.goalDifference - a.row.goalDifference
+    || b.row.goalsFor - a.row.goalsFor);
+  const thirdByMatch = brAssignThirds(thirds.slice(0, 8));
+  const resolve = slot => slot[0] === 'W' ? winners[slot[1]]
+    : slot[0] === 'R' ? runners[slot[1]] : thirdByMatch[slot[1]];
+  return BR_R32.map(([, a, b]) => ({ homeTeam: resolve(a) || null, awayTeam: resolve(b) || null }));
+}
+
 function renderBracket() {
   const ko = allMatches().filter(m => m.stage && m.stage !== 'GROUP_STAGE');
   const byStage = (key) => ko.filter(m => m.stage === key)
     .sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
+  const proj = projectedR32();
 
   $('#bracket').innerHTML = KO_STAGES.map(st => {
-    const ms = byStage(st.key);
+    let ms = byStage(st.key);
+    // 16-avos: enquanto os jogos reais não têm seleções definidas, projeta pela
+    // classificação parcial dos grupos (1º/2º + 8 melhores 3ºs, tabela oficial).
+    if (st.key === 'LAST_32' && proj && !ms.some(m => teamKnown(m.homeTeam) || teamKnown(m.awayTeam))) {
+      ms = proj;
+    }
     const cells = Array.from({ length: st.slots }, (_, i) => bracketMatch(ms[i]));
     return `<div class="bracket-col">
       <h3>${t(st.tkey)}</h3>
